@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{Mutex as AsyncMutex, Notify, OnceCell, watch};
+use tokio::sync::{Notify, OnceCell, watch};
 use tokio::task::spawn_blocking;
 use tower::Service;
 use tower_lsp_server::jsonrpc::{Request as JsonRpcRequest, Result as LspResult};
@@ -43,7 +43,6 @@ pub struct LSPServer {
     sessions: Sessions,
     lifecycle: Arc<SessionLifecycle>,
     initial_configuration: OnceCell<()>,
-    document_notifications: AsyncMutex<()>,
 }
 
 impl RefUnwindSafe for LSPServer {}
@@ -150,7 +149,6 @@ impl LSPServer {
             sessions,
             lifecycle,
             initial_configuration: OnceCell::new(),
-            document_notifications: AsyncMutex::new(()),
         }
     }
 
@@ -483,7 +481,6 @@ impl LanguageServer for LSPServer {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let _guard = self.document_notifications.lock().await;
         self.load_initial_configuration().await;
         handlers::text_document::did_open(&self.session, params)
             .await
@@ -491,21 +488,21 @@ impl LanguageServer for LSPServer {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let _guard = self.document_notifications.lock().await;
+        self.load_initial_configuration().await;
         handlers::text_document::did_change(&self.session, params)
             .await
             .ok();
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let _guard = self.document_notifications.lock().await;
+        self.load_initial_configuration().await;
         handlers::text_document::did_save(&self.session, params)
             .await
             .ok();
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let _guard = self.document_notifications.lock().await;
+        self.load_initial_configuration().await;
         handlers::text_document::did_close(&self.session, params)
             .await
             .ok();
