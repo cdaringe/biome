@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OnceCell, watch};
 use tokio::task::spawn_blocking;
 use tower::Service;
 use tower_lsp_server::jsonrpc::{Request as JsonRpcRequest, Result as LspResult};
@@ -42,6 +42,8 @@ pub struct LSPServer {
     /// Map of all sessions connected to the same [ServerFactory] as this [LSPServer].
     sessions: Sessions,
     lifecycle: Arc<SessionLifecycle>,
+    initial_configuration: OnceCell<()>,
+    document_notifications: AsyncMutex<()>,
 }
 
 impl RefUnwindSafe for LSPServer {}
@@ -147,7 +149,19 @@ impl LSPServer {
             session,
             sessions,
             lifecycle,
+            initial_configuration: OnceCell::new(),
+            document_notifications: AsyncMutex::new(()),
         }
+    }
+
+    async fn load_initial_configuration(&self) {
+        self.initial_configuration
+            .get_or_init(|| async {
+                self.session.load_extension_settings(None).await;
+                self.session.load_workspace_settings(false).await;
+                self.session.set_initialized();
+            })
+            .await;
     }
 
     async fn syntax_tree_request(&self, params: SyntaxTreePayload) -> LspResult<String> {
@@ -393,10 +407,7 @@ impl LanguageServer for LSPServer {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn initialized(&self, _params: InitializedParams) {
         info!("Attempting to load the configuration from 'biome.json' file");
-        self.session.load_extension_settings(None).await;
-        self.session.load_workspace_settings(false).await;
-
-        self.session.set_initialized();
+        self.load_initial_configuration().await;
         let msg = format!("Server initialized with PID: {}", std::process::id());
         self.session
             .client
@@ -472,24 +483,29 @@ impl LanguageServer for LSPServer {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        let _guard = self.document_notifications.lock().await;
+        self.load_initial_configuration().await;
         handlers::text_document::did_open(&self.session, params)
             .await
             .ok();
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let _guard = self.document_notifications.lock().await;
         handlers::text_document::did_change(&self.session, params)
             .await
             .ok();
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        let _guard = self.document_notifications.lock().await;
         handlers::text_document::did_save(&self.session, params)
             .await
             .ok();
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let _guard = self.document_notifications.lock().await;
         handlers::text_document::did_close(&self.session, params)
             .await
             .ok();
@@ -989,6 +1005,10 @@ impl ServerConnection {
             .await;
     }
 }
+
+#[cfg(test)]
+#[path = "server_startup.tests.rs"]
+mod server_startup;
 
 #[cfg(test)]
 #[path = "server_lifecycle.tests.rs"]
